@@ -16,6 +16,7 @@ DEFAULT_STATE = {
     "agent_df": None,
     "agent_chart_specs": [],
     "agent_pending_message": None,
+    "agent_pending_answer": None,
 }
 
 def get_state(key):
@@ -31,7 +32,7 @@ def restart_agent(user_question, filtered_df, show_chart=False):
     set_state("agent_pending_message", None)
 
     tools = get_tools(filtered_df)
-    system_content = "You are a data analyst with access to a tool that executes Python code on a movie database."
+    system_content = "You are a data analyst with access to a tool that executes Python code on a movie database. IMPORTANT: Every single code snippet you generate MUST use print() statements to display results. Do not ever write code without print() - this is required for the user to see your output."
 
     if show_chart:
         tools.append(get_chart_tool())
@@ -67,8 +68,13 @@ def run_step(client):
             get_state("agent_events").append({"type": "thought", "thought": reasoning.reason})
             set_state("agent_phase", "acting")
         else:
-            get_state("agent_events").append({"type": "answer", "thought": reasoning.reason, "answer": reasoning.answer})
-            set_state("agent_phase", "done")
+            get_state("agent_events").append({
+                "type": "proposed_answer",
+                "thought": reasoning.reason,
+                "answer": reasoning.answer
+            })
+            set_state("agent_pending_answer", reasoning.answer)
+            set_state("agent_phase", "awaiting_answer_approval")
 
     elif phase == "acting":
         tools = get_state("agent_tools")
@@ -117,6 +123,7 @@ def execute_pending_tools():
 def reject_pending_tools(feedback):
     messages = get_state("agent_messages")
     pending_msg = get_state("agent_pending_message")
+    pending_answer = get_state("agent_pending_answer")
 
     rejection_msg = "User rejected this action."
     if feedback:
@@ -124,15 +131,26 @@ def reject_pending_tools(feedback):
     else:
         rejection_msg += " Try a different approach."
 
-    messages.append(pending_msg)
-    for tc in pending_msg.tool_calls:
+    # Handle tool rejection
+    if pending_msg:
+        messages.append(pending_msg)
+        for tc in pending_msg.tool_calls:
+            get_state("agent_events").append({
+                "type": "rejected", "name": tc.function.name,
+                "feedback": feedback,
+            })
+            messages.append({"role": "tool", "content": rejection_msg, "tool_call_id": tc.id})
+        set_state("agent_pending_message", None)
+    
+    # Handle answer rejection
+    if pending_answer:
         get_state("agent_events").append({
-            "type": "rejected", "name": tc.function.name,
+            "type": "rejected", "name": "Answer",
             "feedback": feedback,
         })
-        messages.append({"role": "tool", "content": rejection_msg, "tool_call_id": tc.id})
+        messages.append({"role": "user", "content": rejection_msg})
+        set_state("agent_pending_answer", None)
 
-    set_state("agent_pending_message", None)
     set_state("agent_phase", "thinking")
 
 
@@ -179,6 +197,18 @@ def render_pending_approval():
         rejected = st.button("Reject", use_container_width=True)
     return approved, rejected
 
+def render_answer_approval():
+    st.warning("The agent proposes the following answer:")
+    st.write(get_state("agent_pending_answer"))
+
+    col1, col2 = st.columns(2)
+    with col1:
+        approved = st.button("Approve Answer", type="primary", use_container_width=True)
+    with col2:
+        rejected = st.button("Reject Answer", use_container_width=True)
+
+    return approved, rejected
+
 def render_pending_feedback():
     feedback = st.text_input(
         "Why are you rejecting? Tell the agent what to do instead:",
@@ -202,6 +232,12 @@ def render_panel():
                 render_events()
             st.spinner("Agent is thinking...")
 
+        elif phase == "awaiting_answer_approval":
+            with st.expander("Agent Reasoning Trace", expanded=True):
+                render_events()
+            approved, rejected = render_answer_approval()
+            actions = {"approved": approved, "rejected": rejected}
+
         elif phase == "awaiting_approval":
             with st.expander("Agent Reasoning Trace", expanded=True):
                 render_events()
@@ -218,9 +254,10 @@ def render_panel():
             with st.expander("Agent Reasoning Trace", expanded=False):
                 render_events()
             events = get_state("agent_events")
-            if events and events[-1].get("answer"):
-                st.write("**Answer:**")
-                st.write(events[-1]["answer"])
+            final_answer = get_state("agent_pending_answer")
+            if final_answer:
+                st.write("**Final Answer (Approved):**")
+                st.write(final_answer)
             for spec in get_state("agent_chart_specs"):
                 st.vega_lite_chart(spec, use_container_width=True)
 
@@ -244,6 +281,14 @@ def agent_panel(client, analyze_button, user_question, filtered_df, show_chart=F
     elif phase == "awaiting_approval":
         if actions.get("approved"):
             execute_pending_tools()
+            set_state("agent_phase", "thinking")
+            st.rerun()
+        elif actions.get("rejected"):
+            set_state("agent_phase", "awaiting_feedback")
+            st.rerun()
+    elif phase == "awaiting_answer_approval":
+        if actions.get("approved"):
+            set_state("agent_phase", "done")
             st.rerun()
         elif actions.get("rejected"):
             set_state("agent_phase", "awaiting_feedback")

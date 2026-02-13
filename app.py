@@ -89,12 +89,3 @@ with col1:
 
 with col2:
     agent_panel(client, analyze_button, user_question, filtered_df, show_chart)
-
-
-
-# for good practice:
-# git pull origin main     --> do this BEFORE you make any new changes to prevent merge conflicts later
-
-# git add .     --> this adds all the changed files 
-# git commit    --> commits the changed files and prepares it for pushing, you can also add a comment by adding -m "comment"
-# git push origin main --> pushes those changes to github repository
